@@ -36,6 +36,7 @@
 #include <omp.h>
 #include <math.h>
 #include <stdint.h>
+#include <x86intrin.h>
 
 /* the following two definitions of DEBUGGING control whether or not
    debugging information is written out. To put the program into
@@ -43,6 +44,9 @@
 /*#define DEBUGGING(_x) _x */
 /* to stop the printing of debugging information, use the following line: */
 #define DEBUGGING(_x)
+
+#define OFFSET 4
+#define OFFSET_COUNT 16
 
 
 /* write 3d matrix to stdout */
@@ -318,10 +322,101 @@ void team_conv(float *** image, int16_t **** kernels, float *** output,
                int width, int height, int nchannels, int nkernels,
                int kernel_order)
 {
-  // this call here is just dummy code
-  // insert your own code instead
-  multichannel_conv(image, kernels, output, width,
-                    height, nchannels, nkernels, kernel_order);
+
+  // Lovely docs on omp at http://pages.tacc.utexas.edu/~eijkhout/pcse/html
+
+  //PART ONE: Convert information values in image (the rgb stuff, random info
+  // etc.) in to floats as vectorisation allows quick processing of floats and
+  // not doubles. Also no need to cast result as above
+  //============================================================================
+
+  //unusused code that checked levels of parrallelism were there:
+  /*
+  int n = omp_get_max_active_levels();
+  printf("Allowed parrallel levels: %d\n", n);
+  */
+
+  // Declaration of variables for iteration through
+  // alignment loops
+  int i, j, k, l;
+
+  //initialise empty image to poulate with alligned [i][j][k] values
+  float *** floater_image = new_empty_3d_matrix_float(width + kernel_order, height + kernel_order, nchannels);
+
+  // omp parrallel calls for our progam contain...
+  // #pragma (pre processor which provides additional info/libraries at compile-time)
+  // omp (from omp library)
+  // parallel (use parrallel function with 2 params)
+  // for (loop type)
+  // collapse(n) (specifies additional oppurtunities for parrallelism [like nested loops])
+  #pragma omp parallel for collapse(3)
+  for ( i = 0; i < width + kernel_order; i++ ) {
+    for ( j = 0; j < height + kernel_order; j++ ) {
+      for ( k = 0; k < nchannels; k++ ) {
+        floater_image[i][j][k] = (float) image[i][j][k];
+      }
+    }
+  }
+  float **** floater_kernels = new_empty_4d_matrix_float(nkernels, kernel_order, kernel_order, nchannels);
+  // see comments for first parrallel call
+  #pragma omp parallel for collapse(4)
+  for ( i = 0; i < nkernels; i++ ) {
+   for ( j = 0; j < nchannels; j++ ) {
+     for ( k = 0; k < kernel_order; k++ ) {
+       for ( l = 0; l < kernel_order; l++ ) {
+         floater_kernels[i][k][l][j] = kernels[i][j][k][l];
+       }
+     }
+   }
+  }
+
+  //PART TWO: Execution of algorithm.
+  //============================================================================
+  //Declare vars for iteration
+  int m, h, w, x, y, c, yurt;
+  //declare sum outside as address will be referenced loads and cached
+  double sum = 0.0;
+  // iterate through kernel-matrices cols
+  #pragma omp parallel for collapse(3)
+  for ( m = 0; m < nkernels; m++ ) {
+    // iterate through image cols
+    for ( w = 0; w < width; w++ ) {
+      // iterate through image rows
+      for ( h = 0; h < height; h++ ) {
+        // declare res to write to output image
+        sum = 0.0;
+        // iterate through kernel-matrices rows
+          // here is where the magic happens
+          // with the given (m,c) kernel matrix, manipulate image values
+          for ( x = 0; x < kernel_order; x++) {
+            for ( y = 0; y < kernel_order; y++ ) {
+              for ( c = 0; c < nchannels; c+=4 ) {
+              //OLD CODE
+              // Manipulates floater_image "information" (w+x, h+y, c) cell by
+              // multiplying it by kernel value at (m, c, x, y)
+              //sum += floater_image[w+x][h+y][c] *  floater_kernels[m][c][x][y];
+
+              //NEW CODE
+              //....
+              //
+              //because of earlier alignment, we can use the faster load function
+              // instead of loadu. See slides for this info
+              // (see https://www.scss.tcd.ie/David.Gregg/cs3014/notes/vector-programming.pptx)
+              __m128 image_info = _mm_load_ps(&floater_image[w+x][h+y][c]);
+              __m128 kernel_val = _mm_load_ps(&floater_kernels[m][x][y][c]);
+              __m128 res = _mm_mul_ps(image_info, kernel_val);
+              //sum values in res 'registers'
+              res = _mm_hadd_ps(res, res);
+              res = _mm_hadd_ps(res, res);
+              sum += res[0];
+            }
+          }
+        }
+        output[m][w][h] = sum;
+      }
+    }
+  }
+
 }
 
 int main(int argc, char ** argv)

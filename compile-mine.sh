@@ -1,1 +1,1 @@
-gcc -O3 -msse4 conv-harness.c -fopenmp
+gcc -O3 -msse4 conv-harness-1.c -fopenmp
